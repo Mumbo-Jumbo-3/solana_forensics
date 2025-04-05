@@ -58,7 +58,7 @@ async def get_transaction_flow(tx_signature: str):
         logger.error(f"Unexpected error processing transaction: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.get("/transaction/network/{tx_signature}")
+@app.get("/transaction/{tx_signature}")
 async def get_transaction_flow(tx_signature: str):
     try:
         logger.info(f"Fetching transaction data for signature: {tx_signature}")

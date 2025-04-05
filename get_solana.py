@@ -70,7 +70,7 @@ async def fetch_account_inflows(
             from solana.core.fact_transfers
             where
                 tx_to = '{account_address}'
-                and amount > 0.000000001
+                and amount > 0.0000001
             order by block_timestamp asc
             limit 10
         """

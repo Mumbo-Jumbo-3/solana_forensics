@@ -173,7 +173,7 @@ async def build_sankey_data(tx_data: Dict[str, Any], rpc_url: str) -> Dict[str, 
         # headers = {
         #     "accept": "application/json",
         #     "x-chain": "solana",
-        #     "X-API-KEY": "9c907c681def4d6bae59328649208009"
+        #     "X-API-KEY": os.getenv("BIRDEYE_API_KEY")
         # }
         # for token_address in token_addresses:
         #     url = f"https://public-api.birdeye.so/defi/historical_price_unix?address={token_address}&unixtime={result['blockTime']}"

@@ -109,6 +109,7 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                         "value": float(info["lamports"]),
                         "type": "transfer",
                         "mint": "So11111111111111111111111111111111111111112",
+                        "txId": info["signature"]
                     }
                     links.append(link)
 
@@ -133,7 +134,8 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                                     "value": float(info["lamports"]),
                                     "type": "transfer",
                                     "mint": "So11111111111111111111111111111111111111112",
-                                    "tag": "Wrap SOL"
+                                    "tag": "Wrap SOL",
+                                    "txId": info["signature"]
                                 }
                                 links.append(link)
 
@@ -183,7 +185,8 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                                 "type": "transfer",
                                 "mint": info["mint"],
                                 "program_id": current_program_id,
-                                "tag": tags.get(current_program_id, None)
+                                "tag": tags.get(current_program_id, None),
+                                "txId": info["signature"]
                             }
                             links.append(link)
 
@@ -257,7 +260,7 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
         # headers = {
         #     "accept": "application/json",
         #     "x-chain": "solana",
-        #     "X-API-KEY": "9c907c681def4d6bae59328649208009"
+        #     "X-API-KEY": os.getenv("BIRDEYE_API_KEY")
         # }
         # for token_address in token_addresses:
         #     url = f"https://public-api.birdeye.so/defi/historical_price_unix?address={token_address}&unixtime={result['blockTime']}"
@@ -336,7 +339,8 @@ async def build_account_inflows_network(
                 "source": source_node["pubkey"],
                 "target": account_address,
                 "value": inflow["amount"],
-                "mint": inflow["mint"]
+                "mint": inflow["mint"],
+                "txId": inflow["tx_id"]
             }
             links.append(link)
 
