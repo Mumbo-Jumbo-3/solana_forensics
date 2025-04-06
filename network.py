@@ -109,7 +109,7 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                         "value": float(info["lamports"]),
                         "type": "transfer",
                         "mint": "So11111111111111111111111111111111111111112",
-                        "txId": info["signature"]
+                        "txId": transaction["signatures"][0]
                     }
                     links.append(link)
 
@@ -135,7 +135,7 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                                     "type": "transfer",
                                     "mint": "So11111111111111111111111111111111111111112",
                                     "tag": "Wrap SOL",
-                                    "txId": info["signature"]
+                                    "txId": transaction["signatures"][0]
                                 }
                                 links.append(link)
 
@@ -186,7 +186,7 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                                 "mint": info["mint"],
                                 "program_id": current_program_id,
                                 "tag": tags.get(current_program_id, None),
-                                "txId": info["signature"]
+                                "txId": transaction["signatures"][0]
                             }
                             links.append(link)
 
