@@ -1,14 +1,127 @@
 # Parse transaction and build Network data
+import asyncio
 import os
 from typing import Any, Dict
 import aiohttp
+import asyncpg
 from fastapi import HTTPException
 from account_tags import tags
 
-async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[str, Any]:
+async def add_accounts_metadata(
+    nodes: list[Dict[str, Any]],
+    existing_node_pubkeys: list = [],
+    db: asyncpg.Connection = None
+):
+    nodes_dict = {node["pubkey"]: node for node in nodes}
+    new_pubkeys = {node["pubkey"] for node in nodes
+                   if node["pubkey"] not in existing_node_pubkeys
+                   and node["pubkey"] not in ['Validator', 'Burn']}
+    
+    if new_pubkeys:
+        try:
+            db_results = await db.fetch(
+                """
+                SELECT pubkey, label, tags, type, img_url
+                FROM accounts
+                WHERE pubkey = ANY($1)
+                """,
+                list(new_pubkeys)
+            )
+            
+            db_found_pubkeys = set()
+            for result in db_results:
+                pubkey = result['pubkey']
+                db_found_pubkeys.add(pubkey)
+                nodes_dict[pubkey].update({
+                    "label": result['label'],
+                    "tags": result['tags'].split(',') if result['tags'] else [],
+                    "type": result['type'],
+                    "img_url": result['img_url']
+                })
+
+            missing_pubkeys = new_pubkeys - db_found_pubkeys
+            print('missing_pubkeys', missing_pubkeys)
+            if missing_pubkeys:
+                async with aiohttp.ClientSession() as session:
+                    tasks = []
+                    headers = {'token': os.getenv('SOLSCAN_API_KEY')}
+                    for pubkey in missing_pubkeys:
+                        url = f'https://pro-api.solscan.io/v2.0/account/metadata?address={pubkey}'
+                        print('account metadata url', url)
+                        tasks.append(asyncio.create_task(session.get(url, headers=headers)))
+                    
+                    responses = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    insert_values = []
+                    for pubkey, resp in zip(missing_pubkeys, responses):
+                        try:
+                            if isinstance(resp, Exception):
+                                raise resp
+                                
+                            if resp.status == 200:
+                                data = (await resp.json())['data']
+                                account_data = {
+                                    "label": data.get('account_label', ''),
+                                    "tags": data.get('account_tags', []),
+                                    "type": data.get('account_type', ''),
+                                    "img_url": data.get('account_icon', '')
+                                }
+                                
+                                nodes_dict[pubkey].update(account_data)
+                                
+                                insert_values.append((
+                                    pubkey,
+                                    account_data["label"],
+                                    ','.join(account_data["tags"]),
+                                    account_data["type"],
+                                    account_data["img_url"]
+                                ))
+                        except Exception as e:
+                            print(f"Error fetching metadata for {pubkey}: {e}")
+                            nodes_dict[pubkey].update({
+                                "label": "",
+                                "tags": [],
+                                "type": "",
+                                "img_url": ""
+                            })
+
+                    if insert_values:
+                        await db.executemany(
+                            """
+                            INSERT INTO accounts (pubkey, label, tags, type, img_url)
+                            VALUES ($1, $2, $3, $4, $5)
+                            ON CONFLICT (pubkey) DO NOTHING
+                            """,
+                            insert_values
+                        )
+
+        except Exception as e:
+            print(f"Error in metadata processing: {e}")
+            for pubkey in new_pubkeys:
+                nodes_dict[pubkey].update({
+                    "label": "",
+                    "tags": [],
+                    "type": "",
+                    "img_url": ""
+                })
+
+    return list(nodes_dict.values())
+
+async def build_tx_flows_network(
+    tx_data: Dict[str, Any],
+    rpc_url: str,
+    db: asyncpg.Connection = None,
+    existing_node_pubkeys: list = [],
+    existing_edge_ids: list = []
+) -> Dict[str, Any]:
     try:
         nodes = []
-        links = []
+        edges = []
+
+        def add_edge_if_new(edge):
+            edge_id = f"{edge['txId']}-{edge['source']}-{edge['target']}-{edge['mint']}-{edge['amount']}"
+            if edge_id not in existing_edge_ids:
+                edges.append(edge)
 
         result = tx_data["result"]
         meta = result["meta"]
@@ -23,43 +136,43 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
         fee_payer = accounts[0]
         nodes.append({
             "pubkey": fee_payer,
-            "tag": "Fee Payer"
+            "label": "Fee Payer",
         })
 
         nodes.append({
             "pubkey": "Burn",
-            "tag": "Burn"
+            "label": "Burn"
         })
-        links.append({
+        edges.append({
             "source": fee_payer,
             "target": "Burn",
-            "value": base_fee / 2,
+            "amount": base_fee / 2,
             "type": "fee",
             "mint": "So11111111111111111111111111111111111111112",
-            "tag": "Base Fee"
+            "label": "Base Fee"
         })
 
         nodes.append({
             "pubkey": "Validator",
-            "tag": "Validator"
+            "label": "Validator",
         })
-        links.append({
+        edges.append({
             "source": fee_payer,
             "target": "Validator",
-            "value": base_fee / 2,
+            "amount": base_fee / 2,
             "type": "fee",
             "mint": "So11111111111111111111111111111111111111112",
-            "tag": "Base Fee"
+            "label": "Base Fee"
         })
         
         if priority_fee > 0:
-            links.append({
+            edges.append({
                 "source": fee_payer,
                 "target": "Validator",
-                "value": priority_fee,
+                "amount": priority_fee,
                 "type": "fee",
                 "mint": "So11111111111111111111111111111111111111112",
-                "tag": "Priority Fee"
+                "label": "Priority Fee"
             })
 
         ata_to_mint = {}
@@ -90,28 +203,26 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                     info = ix["parsed"]["info"]
                     
                     source_node = {
-                        "pubkey": info["source"],
-                        "tag": tags.get(current_program_id, None)
+                        "pubkey": info["source"]
                     }
                     if source_node not in nodes:
                         nodes.append(source_node)
                     
                     dest_node = {
-                        "pubkey": info["destination"],
-                        "tag": tags.get(current_program_id, None)
+                        "pubkey": info["destination"]
                     }
                     if dest_node not in nodes:
                         nodes.append(dest_node)
                     
-                    link = {
+                    edge = {
                         "source": info["source"],
                         "target": info["destination"],
-                        "value": float(info["lamports"]),
+                        "amount": float(info["lamports"]),
                         "type": "transfer",
                         "mint": "So11111111111111111111111111111111111111112",
                         "txId": transaction["signatures"][0]
                     }
-                    links.append(link)
+                    add_edge_if_new(edge)
 
                     for inner_ix_group in meta.get("innerInstructions", []):
                         for inner_ix in inner_ix_group["instructions"]:
@@ -125,19 +236,19 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                                 # tag node where pubkey matches info["destination"] as "Wrap SOL"
                                 for node in nodes:
                                     if node["pubkey"] == info["destination"]:
-                                        node["tag"] = "Wrap SOL"
+                                        node["label"] = "Wrap SOL"
                                         break
                                 
-                                link = {
+                                edge = {
                                     "source": info["destination"],
                                     "target": info["source"],
-                                    "value": float(info["lamports"]),
+                                    "amount": float(info["lamports"]),
                                     "type": "transfer",
                                     "mint": "So11111111111111111111111111111111111111112",
                                     "tag": "Wrap SOL",
                                     "txId": transaction["signatures"][0]
                                 }
-                                links.append(link)
+                                add_edge_if_new(edge)
 
                 
                 elif ix["parsed"].get("type") == "createIdempotent" and ix["programId"] == "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL":
@@ -165,224 +276,219 @@ async def build_tx_flows_network(tx_data: Dict[str, Any], rpc_url: str) -> Dict[
                             info["dest_owner"] = ata_to_owner[info["destination"]]
 
                             source_node = {
-                                "pubkey": info["authority"],
-                                "tag": tags.get(info["authority"], None)
+                                "pubkey": info["authority"]
                             }
                             if not any(node["pubkey"] == source_node["pubkey"] for node in nodes):
                                 nodes.append(source_node)
                             
                             dest_node = {
-                                "pubkey": info["dest_owner"],
-                                "tag": tags.get(info["dest_owner"], None)
+                                "pubkey": info["dest_owner"]
                             }
                             if not any(node["pubkey"] == dest_node["pubkey"] for node in nodes):
                                 nodes.append(dest_node)
                             
-                            link = {
+                            edge = {
                                 "source": info["authority"],
                                 "target": info["dest_owner"],
-                                "value": float(info["amount"] if "amount" in info else info["tokenAmount"]["amount"]),
+                                "amount": float(info["amount"] if "amount" in info else info["tokenAmount"]["amount"]),
                                 "type": "transfer",
                                 "mint": info["mint"],
-                                "program_id": current_program_id,
-                                "tag": tags.get(current_program_id, None),
+                                "programId": current_program_id,
                                 "txId": transaction["signatures"][0]
                             }
-                            links.append(link)
+                            add_edge_if_new(edge)
 
                     else:
                         current_program_id = ix["programId"]
 
         
-        # GET TICKERS AND DECIMALS FOR WHOLE AMOUNTS
+        # ADD TRANSFER METADATA
         token_addresses = {
-            link["mint"] for link in links if "mint" in link and "mint" != "So11111111111111111111111111111111111111112"
+            edge["mint"] for edge in edges if "mint" in edge and "mint" not in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]
         }
         token_tickers = {}
         token_decimals = {}
+        token_img_urls = {}
 
         for token_address in token_addresses:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(rpc_url, json={
-                        "jsonrpc": "2.0",
-                        "id": "test",
-                        "method": "getAsset",
-                        "params": {
-                            "id": token_address
-                        }
-                    }) as resp:
-                        if resp.status != 200:
-                            raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
-                        data = await resp.json()
-                        ticker = data['result']['content']['metadata']['symbol']
-                        decimals = data['result']['token_info']['decimals']
-                        print(ticker)
-                        token_tickers[token_address] = ticker
-                        token_decimals[token_address] = decimals
+                db_result = await db.fetchrow(
+                    """
+                    SELECT ticker, decimals, img_url
+                    FROM tokens
+                    WHERE mint = $1
+                    """,
+                    token_address
+                )
+                if db_result:
+                    token_tickers[token_address] = db_result['ticker']
+                    token_decimals[token_address] = db_result['decimals']
+                    token_img_urls[token_address] = db_result['img_url']
+                else:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(rpc_url, json={
+                            "jsonrpc": "2.0",
+                            "id": "test",
+                            "method": "getAsset",
+                            "params": {
+                                "id": token_address
+                            }
+                        }) as resp:
+                            if resp.status != 200:
+                                raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
+                            data = await resp.json()
+                            ticker = data['result']['content']['metadata']['symbol']
+                            decimals = data['result']['token_info']['decimals']
+                            img_url = data['result']['content']['links']['image']
+
+                            await db.execute(
+                                """
+                                INSERT INTO tokens (mint, ticker, decimals, img_url)
+                                VALUES ($1, $2, $3, $4)
+                                """,
+                                token_address, ticker, decimals, img_url
+                            )
+
+                            token_tickers[token_address] = ticker
+                            token_decimals[token_address] = decimals
+                            token_img_urls[token_address] = img_url
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"RPC request failed: {str(e)}")
         
-        
-        for link in links:
-            if "mint" in link:
-                if link["mint"] == "So11111111111111111111111111111111111111112":
-                    link["ticker"] = "SOL"
-                    link["value"] = float(link["value"]) / 10 ** 9
+        for edge in edges:
+            if "mint" in edge:
+                if edge["mint"] in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]:
+                    edge["ticker"] = "SOL"
+                    edge["tokenImage"] = "https://assets.coingecko.com/coins/images/4128/standard/solana.png?1718769756"
+                    edge["amount"] = float(edge["amount"]) / 10 ** 9
                 else:
-                    link["ticker"] = token_tickers[link["mint"]]
-                    link["value"] = float(link["value"]) / 10 ** token_decimals[link["mint"]]
+                    edge["ticker"] = token_tickers[edge["mint"]]
+                    edge["tokenImage"] = token_img_urls[edge["mint"]]
+                    edge["amount"] = float(edge["amount"]) / 10 ** token_decimals[edge["mint"]]
 
-        # # GET ACCOUNT TAGS
-        # pubkeys_to_check = set(node["pubkey"] for node in nodes) | {
-        #     link["program_id"] for link in links if "program_id" in link
-        # }
+        # ADD ACCOUNT METADATA
+        nodes = await add_accounts_metadata(nodes, existing_node_pubkeys, db)
         
-        # headers = {"token": os.getenv('SOLSCAN_API_KEY')}
-        # for pubkey in pubkeys_to_check:
-        #     solscan_metadata_url = "https://pro-api.solscan.io/v2.0/account/metadata"
-        #     try:
-        #         async with aiohttp.ClientSession() as session:
-        #             async with session.get(solscan_metadata_url, headers=headers) as resp:
-        #                 if resp.status != 200:
-        #                     raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
-        #                 data = await resp.json()
-        #                 ticker = data['result']['content']['metadata']['symbol']
-        #                 decimals = data['result']['token_info']['decimals']
-        #                 print(ticker)
-        #                 token_tickers[token_address] = ticker
-        #                 token_decimals[token_address] = decimals
-        #     except Exception as e:
-        #         raise HTTPException(status_code=500, detail=f"RPC request failed: {str(e)}")
-        
-        # GET TOKEN PRICES
-        # token_prices = {}
-        # headers = {
-        #     "accept": "application/json",
-        #     "x-chain": "solana",
-        #     "X-API-KEY": os.getenv("BIRDEYE_API_KEY")
-        # }
-        # for token_address in token_addresses:
-        #     url = f"https://public-api.birdeye.so/defi/historical_price_unix?address={token_address}&unixtime={result['blockTime']}"
-        #     async with aiohttp.ClientSession() as session:
-        #         async with session.get(url, headers=headers) as resp:
-        #             if resp.status != 200:
-        #                 raise HTTPException(status_code=resp.status, detail="Failed to fetch token price data")
-        #             data = await resp.json()
-        #             token_prices[token_address] = data.get('data', {}).get('value', 0)
-        
-        # # Update links with USD values
-        # for link in links:
-        #     if link["type"] == "SOL":
-        #         # SOL transfers (using wrapped SOL price)
-        #         sol_price = token_prices.get('So11111111111111111111111111111111111111112', 0)
-        #         link["usd_value"] = link["value"] * sol_price
-        #     elif link["type"] == "TOKEN":
-        #         # Token transfers
-        #         token_price = token_prices.get(link["mint"], 0)
-        #         link["usd_value"] = link["value"] * token_price
-
-        return {"nodes": nodes, "links": links}
+        return {"nodes": nodes, "edges": edges}
+    
     except KeyError as e:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid transaction data structure: {str(e)}"
         )
+    
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
-        )
+        )        
     
-async def build_account_balances_network(
-    account_balances: list[Dict[str, Any]],
+async def build_account_flows_network(
+    flows_data: list[Dict[str, Any]],
+    rpc_url: str,
+    db: asyncpg.Connection = None,
+    existing_node_pubkeys: list = [],
+    existing_edge_ids: list = []
 ) -> Dict[str, Any]:
     try:
         nodes = []
-        links = []
+        edges = []
 
-        for balance in account_balances:
-            node = {
-                "pubkey": balance["owner"],
-                "tag": tags.get(balance["mint"], None)
-            }
-            if node not in nodes:
-                nodes.append(node)
+        def add_edge_if_new(edge):
+            edge_id = f"{edge['txId']}-{edge['source']}-{edge['target']}-{edge['mint']}-{edge['amount']}"
+            if edge_id not in existing_edge_ids:
+                edges.append(edge)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-        
-    
-async def build_account_inflows_network(
-    inflows_data: list[Dict[str, Any]],
-    account_address: str,
-    rpc_url: str
-) -> Dict[str, Any]:
-    try:
-        nodes = []
-        links = []
-
-        dest_node = {
-            "pubkey": account_address,
-        }
-        nodes.append(dest_node)
-
-        for inflow in inflows_data:
+        for flow in flows_data:
             source_node = {
-                "pubkey": inflow["tx_from"],
-                "tag": tags.get(inflow["tx_from"], None)
+                "pubkey": flow["from_address"],
             }
-            if source_node not in nodes:
+            if not any(node["pubkey"] == source_node["pubkey"] for node in nodes):
                 nodes.append(source_node)
-
-            link = {
-                "source": source_node["pubkey"],
-                "target": account_address,
-                "value": inflow["amount"],
-                "mint": inflow["mint"],
-                "txId": inflow["tx_id"]
+            
+            dest_node = {
+                "pubkey": flow["to_address"]
             }
-            links.append(link)
+            if not any(node["pubkey"] == dest_node["pubkey"] for node in nodes):
+                nodes.append(dest_node)
+                
+            edge = {
+                'source': flow['from_address'],
+                'target': flow['to_address'],
+                'amount': flow['amount'] / 10 ** flow['token_decimals'],
+                'mint': flow['token_address'],
+                'txId': flow['trans_id'],
+                'blockTime': flow['block_time'],
+                'type': flow['activity_type']
+            }
+            add_edge_if_new(edge)
 
+        # ADD TRANSFER METADATA
         token_addresses = {
-            link["mint"] for link in links if "mint" in link and "mint" not in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]
+            edge["mint"] for edge in edges if "mint" in edge and "mint" not in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]
         }
         token_tickers = {}
-        token_decimals = {}
+        token_img_urls = {}
 
         for token_address in token_addresses:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(rpc_url, json={
-                        "jsonrpc": "2.0",
-                        "id": "test",
-                        "method": "getAsset",
-                        "params": {
-                            "id": token_address
-                        }
-                    }) as resp:
-                        if resp.status != 200:
-                            raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
-                        data = await resp.json()
-                        print(data)
-                        ticker = data['result']['content']['metadata']['symbol']
-                        decimals = data['result']['token_info']['decimals']
-                        print(ticker)
-                        token_tickers[token_address] = ticker
-                        token_decimals[token_address] = decimals
+                db_result = await db.fetchrow(
+                    """
+                    SELECT ticker, decimals, img_url
+                    FROM tokens
+                    WHERE mint = $1
+                    """,
+                    token_address
+                )
+                if db_result:
+                    token_tickers[token_address] = db_result['ticker']
+                    token_img_urls[token_address] = db_result['img_url']
+                else:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(rpc_url, json={
+                            "jsonrpc": "2.0",
+                            "id": "test",
+                            "method": "getAsset",
+                            "params": {
+                                "id": token_address
+                            }
+                        }) as resp:
+                            if resp.status != 200:
+                                raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
+                            data = await resp.json()
+                            print(data)
+                            ticker = data['result']['content']['metadata']['symbol']
+                            decimals = data['result']['token_info']['decimals']
+                            img_url = data['result']['content']['links']['image']
+
+                            await db.execute(
+                                """
+                                INSERT INTO tokens (mint, ticker, decimals, img_url)
+                                VALUES ($1, $2, $3, $4)
+                                """,
+                                token_address, ticker, decimals, img_url
+                            )
+
+                            token_tickers[token_address] = ticker
+                            token_img_urls[token_address] = img_url
+                            
             except Exception as e:
                 #raise HTTPException(status_code=500, detail=f"RPC request failed: {str(e)}")
-                token_tickers[token_address] = "UNKNOWN"
-                token_decimals[token_address] = 0  # default to 9 decimals
+                token_tickers[token_address] = ""
+                token_img_urls[token_address] = ""
         
-        
-        for link in links:
-            if "mint" in link:
-                if link["mint"] in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]:
-                    link["ticker"] = "SOL"
+        for edge in edges:
+            if "mint" in edge:
+                if edge["mint"] in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]:
+                    edge["ticker"] = "SOL"
+                    edge['tokenImage'] = "https://assets.coingecko.com/coins/images/4128/standard/solana.png?1718769756"
                 else:
-                    link["ticker"] = token_tickers[link["mint"]]
+                    edge["ticker"] = token_tickers[edge["mint"]]
+                    edge['tokenImage'] = token_img_urls[edge["mint"]]
 
-        return {"nodes": nodes, "links": links}
+        # ADD ACCOUNT METADATA
+        nodes = await add_accounts_metadata(nodes, existing_node_pubkeys, db)
+
+        return {"nodes": nodes, "edges": edges}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

@@ -1,4 +1,4 @@
-from flipside import Flipside
+import asyncpg
 import os
 import aiohttp
 import json
@@ -9,7 +9,58 @@ import logging
 logger = logging.getLogger(__name__)
 
 rpc_url = "https://mainnet.helius-rpc.com/?api-key=" + os.getenv("HELIUS_API_KEY")
-flipside = Flipside(api_key=os.getenv("FLIPSIDE_API_KEY"))
+# flipside = Flipside(api_key=os.getenv("FLIPSIDE_API_KEY"))
+
+async def fetch_account_metadata(account_address: str, db: asyncpg.Connection) -> Dict[str, Any]:
+    try:
+        db_result = await db.fetchrow(
+            """
+            SELECT label, tags, img_url, type
+            FROM accounts
+            WHERE pubkey = $1
+            """,
+            account_address
+        )
+        if db_result:
+            return {
+                'pubkey': account_address,
+                'label': db_result['label'],
+                'tags': db_result['tags'],
+                'type': db_result['type'],
+                'img_url': db_result['img_url']
+            }
+        else:
+            url = f'https://pro-api.solscan.io/v2.0/account/metadata?address={account_address}'
+            headers = {
+                'token': os.getenv('SOLSCAN_API_KEY')
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        raise HTTPException(status_code=resp.status, detail="Failed to fetch account metadata")
+                    json_data = await resp.json()
+                    data = json_data['data']
+                    await db.execute(
+                        """
+                        INSERT INTO accounts (pubkey, label, tags, type, img_url)
+                        VALUES ($1, $2, $3, $4, $5)
+                        """,
+                        account_address,
+                        data['account_label'],
+                        data['account_tags'],
+                        data['account_type'],
+                        data['account_icon']
+                    )
+                    return {
+                        'pubkey': account_address,
+                        'label': data['account_label'],
+                        'tags': data['account_tags'],
+                        'type': data['account_type'],
+                        'img_url': data['account_icon']
+                    }
+    except Exception as e:
+        logger.error(f"Unexpected error fetching account metadata: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 async def fetch_transaction(tx_signature: str) -> Dict[str, Any]:
     try:
@@ -29,85 +80,44 @@ async def fetch_transaction(tx_signature: str) -> Dict[str, Any]:
                 if resp.status != 200:
                     raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
                 json_data = await resp.json()
-                # with open(f"tx_{tx_signature}.json", "w") as f:
-                #     json.dump(json_data, f, indent=2)
+                with open(f"tx_{tx_signature}.json", "w") as f:
+                    json.dump(json_data, f, indent=2)
                 return json_data
     except aiohttp.ClientError as e:
         raise HTTPException(status_code=500, detail=f"RPC request failed: {str(e)}")
     
-async def fetch_account_inflows(
-    account_address
+async def fetch_account_flows(
+    account_address,
+    direction: str = "in",
+    sort: str = "asc",
+    limit: int = 10,
+    page: int = 1,
 ) -> list[Dict[str, Any]]:
-    # if mint in ['So11111111111111111111111111111111111111111', 'So11111111111111111111111111111111111111112']:
-    #     mint = ['So11111111111111111111111111111111111111111', 'So11111111111111111111111111111111111111112']
-    # try:
-    #     query = f"""
-    #         select
-    #             block_timestamp,
-    #             tx_id,
-    #             tx_from,
-    #             tx_to,
-    #             amount
-    #         from solana.core.fact_transfers
-    #         where
-    #             tx_to = '{account_address}'
-    #             and mint{" = " + mint if type(mint) == str else " in (" + ", ".join(mint) + ")"}
-    #         limit 10
-    #     """
-    #     result = flipside.query(query)
-    #     records = result['records']
-    #     print(records)
-    #     return records
     try:
-        query = f"""
-            select
-                block_timestamp,
-                tx_id,
-                tx_from,
-                tx_to,
-                mint,
-                amount
-            from solana.core.fact_transfers
-            where
-                tx_to = '{account_address}'
-                and amount > 0.0000001
-            order by block_timestamp asc
-            limit 10
-        """
-        result = flipside.query(query)
-        records = result.records
-        print(records)
-        return records
-    except Exception as e:
-        logger.error(f"Unexpected error fetching account balance inflow txs: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-    
-async def fetch_account_balances(account_address: str) -> Dict[str, Any]:
-    try:
+        url = (
+            f"https://pro-api.solscan.io/v2.0/account/transfer"
+            f"?address={account_address}"
+            f"&flow={direction}"
+            f"&page={page}"
+            f"&page_size={limit}"
+            f"&sort_by=block_time"
+            f"&sort_order={sort}"
+        )
+        headers = {
+            'token': os.getenv("SOLSCAN_API_KEY")
+        }
         async with aiohttp.ClientSession() as session:
-            async with session.post(rpc_url, json={
-                "jsonrpc": "2.0",
-                "id": "text",
-                "method": "getAssetsByOwner",
-                "params": {
-                    "ownerAddress": account_address,
-                    "page": 1,
-                    "limit": 100,
-                    "sortBy": {
-                        "sortBy": "recent_action",
-                        "sortOrder": "desc"
-                    },
-                    "options": {
-                        "showFungible": True,
-                        "showNativeBalance": True,
-                    }
-                }
-            }) as resp:
+            async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
+                    print('resp.text', await resp.text())
                     raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
                 json_data = await resp.json()
-                return json_data
-            
-    except aiohttp.ClientError as e:
-        raise HTTPException(status_code=500, detail=f"RPC request failed: {str(e)}")
+                if json_data.get('success') != True:
+                    print('json_data', json_data)
+                    raise HTTPException(status_code=400, detail="Failed to fetch transaction data")
+                return json_data['data']
+
+    except Exception as e:
+        logger.error(f"Unexpected error fetching account inflow txs: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
