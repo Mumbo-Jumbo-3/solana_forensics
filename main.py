@@ -135,6 +135,7 @@ async def get_account_flows(
             flows_data,
             rpc_url=rpc_url,
             db=db,
+            limit=limit,
             existing_node_pubkeys=existing_network_data.existingNodes,
             existing_edge_ids=existing_network_data.existingEdges
         )

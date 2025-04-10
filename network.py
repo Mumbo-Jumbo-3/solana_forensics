@@ -489,7 +489,11 @@ async def build_account_flows_network(
 
         # ADD ACCOUNT METADATA
         nodes = await add_accounts_metadata(nodes, existing_node_pubkeys, db)
-
+        
+        print(limit)
+        print(len(flows_data))
+        print(len(nodes))
+        print(len(edges))
         if limit == len(flows_data):
             return {"nodes": nodes, "edges": edges, "hasMore": True}
         elif limit > len(flows_data):
