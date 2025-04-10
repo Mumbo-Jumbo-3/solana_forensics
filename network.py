@@ -401,6 +401,10 @@ async def build_account_flows_network(
                 edges.append(edge)
 
         for flow in flows_data:
+            if not flow["from_address"] or not flow["to_address"]:
+                print(flow)
+                continue
+            
             source_node = {
                 "pubkey": flow["from_address"],
             }
@@ -490,10 +494,6 @@ async def build_account_flows_network(
         # ADD ACCOUNT METADATA
         nodes = await add_accounts_metadata(nodes, existing_node_pubkeys, db)
         
-        print(limit)
-        print(len(flows_data))
-        print(len(nodes))
-        print(len(edges))
         if limit == len(flows_data):
             return {"nodes": nodes, "edges": edges, "hasMore": True}
         elif limit > len(flows_data):
