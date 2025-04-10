@@ -46,17 +46,17 @@ async def fetch_account_metadata(account_address: str, db: asyncpg.Connection) -
                         VALUES ($1, $2, $3, $4, $5)
                         """,
                         account_address,
-                        data['account_label'],
-                        data['account_tags'],
-                        data['account_type'],
-                        data['account_icon']
+                        data.get('account_label', ''),
+                        data.get('account_tags', ''),
+                        data.get('account_type', ''),
+                        data.get('account_icon', '')
                     )
                     return {
                         'pubkey': account_address,
-                        'label': data['account_label'],
-                        'tags': data['account_tags'],
-                        'type': data['account_type'],
-                        'img_url': data['account_icon']
+                        'label': data.get('account_label', ''),
+                        'tags': data.get('account_tags', []),
+                        'type': data.get('account_type', ''),
+                        'img_url': data.get('account_icon', '')
                     }
     except Exception as e:
         logger.error(f"Unexpected error fetching account metadata: {str(e)}", exc_info=True)

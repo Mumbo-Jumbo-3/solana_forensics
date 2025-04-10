@@ -387,6 +387,7 @@ async def build_account_flows_network(
     flows_data: list[Dict[str, Any]],
     rpc_url: str,
     db: asyncpg.Connection = None,
+    limit: int = 10,
     existing_node_pubkeys: list = [],
     existing_edge_ids: list = []
 ) -> Dict[str, Any]:
@@ -489,6 +490,9 @@ async def build_account_flows_network(
         # ADD ACCOUNT METADATA
         nodes = await add_accounts_metadata(nodes, existing_node_pubkeys, db)
 
-        return {"nodes": nodes, "edges": edges}
+        if limit == len(flows_data):
+            return {"nodes": nodes, "edges": edges, "hasMore": True}
+        elif limit > len(flows_data):
+            return {"nodes": nodes, "edges": edges, "hasMore": False}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
