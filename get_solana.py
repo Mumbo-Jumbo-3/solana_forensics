@@ -40,6 +40,8 @@ async def fetch_account_metadata(account_address: str, db: asyncpg.Connection) -
                         raise HTTPException(status_code=resp.status, detail="Failed to fetch account metadata")
                     json_data = await resp.json()
                     data = json_data['data']
+                    tags = data.get('account_tags', [])
+                    tags_str = ', '.join(tags)
                     await db.execute(
                         """
                         INSERT INTO accounts (pubkey, label, tags, type, img_url)
@@ -47,14 +49,14 @@ async def fetch_account_metadata(account_address: str, db: asyncpg.Connection) -
                         """,
                         account_address,
                         data.get('account_label', ''),
-                        data.get('account_tags', ''),
+                        tags_str,
                         data.get('account_type', ''),
                         data.get('account_icon', '')
                     )
                     return {
                         'pubkey': account_address,
                         'label': data.get('account_label', ''),
-                        'tags': data.get('account_tags', []),
+                        'tags': tags,
                         'type': data.get('account_type', ''),
                         'img_url': data.get('account_icon', '')
                     }
