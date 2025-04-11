@@ -1,5 +1,6 @@
 # Parse transaction and build Network data
 import asyncio
+from datetime import datetime
 import os
 from typing import Any, Dict
 import aiohttp
@@ -400,6 +401,10 @@ async def build_account_flows_network(
             if edge_id not in existing_edge_ids:
                 edges.append(edge)
 
+        token_days = [(flow['token_address'], datetime.fromtimestamp(flow['block_time']).strftime('%Y%m%d')) for flow in flows_data]
+        unique_token_days = list(set(token_days))
+        prices_map = await get_prices(unique_token_days, db)
+
         for flow in flows_data:
             if not flow["from_address"] or not flow["to_address"]:
                 print(flow)
@@ -416,11 +421,16 @@ async def build_account_flows_network(
             }
             if not any(node["pubkey"] == dest_node["pubkey"] for node in nodes):
                 nodes.append(dest_node)
+
+            whole_amount = flow['amount'] / 10 ** flow['token_decimals']
+            date_str = datetime.fromtimestamp(flow['block_time']).strftime('%Y%m%d')
+            price = prices_map[(flow['token_address'], date_str)]
                 
             edge = {
                 'source': flow['from_address'],
                 'target': flow['to_address'],
-                'amount': flow['amount'] / 10 ** flow['token_decimals'],
+                'amount': whole_amount,
+                'value': price * whole_amount if price else None,
                 'mint': flow['token_address'],
                 'txId': flow['trans_id'],
                 'blockTime': flow['block_time'],
@@ -498,5 +508,94 @@ async def build_account_flows_network(
             return {"nodes": nodes, "edges": edges, "hasMore": True}
         elif limit > len(flows_data):
             return {"nodes": nodes, "edges": edges, "hasMore": False}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+async def get_prices(token_days, db: asyncpg.Connection = None):
+    prices_map = {}
+    if not token_days:
+        return prices_map
+    
+    try:
+        tokens = [pair[0] for pair in token_days]
+        days = [pair[1] for pair in token_days]
+
+        db_results = await db.fetch(
+            """
+            SELECT mint, day, price
+            FROM prices_daily
+            WHERE (mint, day) IN (
+                SELECT * FROM unnest($1::text[], $2::text[])
+            )
+            """,
+            tokens, days
+        )
+
+        for result in db_results:
+            prices_map[(result['mint'], result['day'])] = float(result['price']) if result['price'] else None
+
+        missing_pairs = [pair for pair in token_days if pair not in prices_map]
+            
+        if missing_pairs:
+            token_to_days = {}
+            for token, day in missing_pairs:
+                if token not in token_to_days:
+                    token_to_days[token] = []
+                token_to_days[token].append(day)
+            
+            headers = {'token': os.getenv('SOLSCAN_API_KEY')}
+            async with aiohttp.ClientSession() as session:
+                tasks = []
+                
+                for token, days in token_to_days.items():
+                    days.sort()
+                    from_time = min(days)
+                    to_time = max(days)
+                    
+                    url = f"https://pro-api.solscan.io/v2.0/token/price?address={token}&from_time={from_time}&to_time={to_time}"
+                    tasks.append(asyncio.create_task(session.get(url, headers=headers)))
+                
+                responses = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                insert_values = []
+                for (token, _), resp in zip(token_to_days.items(), responses):
+                    if isinstance(resp, Exception):
+                        print(f"Error fetching price for {token}: {resp}")
+                        for day in token_to_days[token]:
+                            prices_map[(token, day)] = None
+                            insert_values.append((token, day, None))
+                        continue
+                        
+                    if resp.status == 200:
+                        json_data = await resp.json()
+                        days_with_prices = set()
+
+                        if json_data.get('data'):
+                            for price_data in json_data['data']:
+                                day = price_data.get('date')
+                                price = price_data.get('price')
+                                
+                                if day:
+                                    days_with_prices.add(day)
+                                    prices_map[(token, day)] = float(price)
+                                    insert_values.append((token, str(day), float(price)))
+                        
+                        for day in token_to_days[token]:
+                            if day not in days_with_prices:
+                                prices_map[(token, day)] = None
+                                insert_values.append((token, str(day), None))
+                
+                # Bulk insert new prices
+                if insert_values:
+                    await db.executemany(
+                        """
+                        INSERT INTO prices_daily (mint, day, price)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (mint, day) DO NOTHING
+                        """,
+                        insert_values
+                    )
+        
+        return prices_map
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
