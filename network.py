@@ -13,6 +13,9 @@ async def add_accounts_metadata(
     existing_node_pubkeys: list = [],
     db: asyncpg.Connection = None
 ):
+    if not db:
+        return nodes
+    
     nodes_dict = {node["pubkey"]: node for node in nodes}
     new_pubkeys = {node["pubkey"] for node in nodes
                    if node["pubkey"] not in existing_node_pubkeys
@@ -129,6 +132,8 @@ async def build_tx_flows_network(
         transaction = result["transaction"]
         accounts = [account["pubkey"] for account in transaction["message"]["accountKeys"]]
 
+        token_days = set()
+
         # PROCESS FEES
         total_fee = meta["fee"]
         base_fee = len(transaction['signatures']) * 5000  # Base fee calculation
@@ -176,6 +181,8 @@ async def build_tx_flows_network(
                 "label": "Priority Fee"
             })
 
+        token_days.add(("So11111111111111111111111111111111111111112", datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d')))
+
         ata_to_mint = {}
         ata_to_owner = {}
         
@@ -184,6 +191,7 @@ async def build_tx_flows_network(
             ata_pubkey = accounts[account_index]
             ata_to_mint[ata_pubkey] = balance['mint']
             ata_to_owner[ata_pubkey] = balance['owner']
+            token_days.add((balance['mint'], datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d')))
         
         for balance in meta.get("postTokenBalances", []):
             account_index = balance['accountIndex']
@@ -194,6 +202,9 @@ async def build_tx_flows_network(
 
         print(ata_to_mint)
         print(ata_to_owner)
+
+        prices_map = await get_prices(token_days, db)
+        print(prices_map)
 
         current_program_id = None
 
@@ -239,11 +250,12 @@ async def build_tx_flows_network(
                                     if node["pubkey"] == info["destination"]:
                                         node["label"] = "Wrap SOL"
                                         break
-                                
+                                        
                                 edge = {
                                     "source": info["destination"],
                                     "target": info["source"],
-                                    "amount": float(info["lamports"]),
+                                    "amount": info["lamports"],
+                                    "value": info["lamports"],
                                     "type": "transfer",
                                     "mint": "So11111111111111111111111111111111111111112",
                                     "tag": "Wrap SOL",
@@ -257,6 +269,63 @@ async def build_tx_flows_network(
                     ata_pubkey = info["account"]
                     ata_to_mint[ata_pubkey] = info["mint"]
                     ata_to_owner[ata_pubkey] = info["wallet"]
+
+                elif ix["parsed"].get("type") == "createAccount" and ix["parsed"].get("info").get("owner") == "Stake11111111111111111111111111111111111111":
+                    print(ix)
+                    info = ix["parsed"]["info"]
+                    lamports = float(info["lamports"])
+                    new_account = info["newAccount"]
+                    source = info["source"]
+
+                    source_node = {
+                        "pubkey": source
+                    }
+                    if source_node not in nodes:
+                        nodes.append(source_node)
+
+                    stake_account_node = {
+                        "pubkey": new_account
+                    }
+                    if stake_account_node not in nodes:
+                        nodes.append(stake_account_node)
+
+                    edge = {
+                        "source": source,
+                        "target": new_account,
+                        "amount": lamports,
+                        "type": "stake",
+                        "mint": "So11111111111111111111111111111111111111112",
+                        "txId": transaction["signatures"][0]
+                    }
+                    add_edge_if_new(edge)
+                
+                elif ix["parsed"].get("type") == "delegate" and ix.get("programId") == "Stake11111111111111111111111111111111111111":
+                    info = ix["parsed"]["info"]
+                    stake_account = info["stakeAccount"]
+                    vote_account = info["voteAccount"]
+                    
+                    stake_account_node = {
+                        "pubkey": stake_account
+                    }
+                    if stake_account_node not in nodes:
+                        nodes.append(stake_account_node)
+                    
+                    vote_account_node = {
+                        "pubkey": vote_account
+                    }
+                    if vote_account_node not in nodes:
+                        nodes.append(vote_account_node)
+                        
+                    edge = {
+                        "source": stake_account,
+                        "target": vote_account,
+                        "amount": 1,
+                        "type": "delegate",
+                        "mint": "So11111111111111111111111111111111111111112",
+                        "txId": transaction["signatures"][0]
+                    }
+                    add_edge_if_new(edge)
+            
         
         # PROCESS INNER INSTRUCTIONS
         current_program_id = None
@@ -356,12 +425,15 @@ async def build_tx_flows_network(
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"RPC request failed: {str(e)}")
         
+        sol_price = prices_map[("So11111111111111111111111111111111111111112", datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d'))]
         for edge in edges:
-            if "mint" in edge:
+            if "mint" in edge and edge["type"] != "delegate":
                 if edge["mint"] in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]:
+                    sol_amount = float(edge["amount"]) / 10 ** 9
                     edge["ticker"] = "SOL"
                     edge["tokenImage"] = "https://assets.coingecko.com/coins/images/4128/standard/solana.png?1718769756"
-                    edge["amount"] = float(edge["amount"]) / 10 ** 9
+                    edge["amount"] = sol_amount
+                    edge["value"] = sol_amount * sol_price
                 else:
                     edge["ticker"] = token_tickers[edge["mint"]]
                     edge["tokenImage"] = token_img_urls[edge["mint"]]
@@ -369,6 +441,8 @@ async def build_tx_flows_network(
 
         # ADD ACCOUNT METADATA
         nodes = await add_accounts_metadata(nodes, existing_node_pubkeys, db)
+        print(nodes)
+        print(edges)
         
         return {"nodes": nodes, "edges": edges}
     

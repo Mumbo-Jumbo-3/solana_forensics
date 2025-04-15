@@ -59,8 +59,14 @@ class ExistingNetworkData(BaseModel):
     existingEdges: list[str] = []
 
 async def get_db():
-    async with db_pool.acquire() as connection:
-        yield connection
+    if not db_pool:
+        raise HTTPException(status_code=500, detail="Database connection pool not initialized")
+    
+    conn = await db_pool.acquire()
+    try:
+        yield conn
+    finally:
+        await db_pool.release(conn)
 
 @app.get("/account/{account_address}")
 async def get_account(
