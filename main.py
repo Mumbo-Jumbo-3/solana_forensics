@@ -2,20 +2,14 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from solana.rpc.api import Client
-import aiohttp
-import asyncio
 import os
-from typing import Dict, Any
 import logging
-import json
 import asyncpg
 import warnings
 warnings.filterwarnings("always", category=UserWarning)
 
-from get_solana import fetch_account_flows, fetch_account_metadata, fetch_transaction
-from network import build_account_flows_network, build_tx_flows_network
-from sankey import build_sankey_data
+from solana_utils import fetch_account_metadata, fetch_transaction, fetch_account_flows
+from graph_utils import build_tx_flows_network, build_account_flows_network
 
 # Set up logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -135,7 +129,7 @@ async def get_account_flows(
             limit=limit,
             page=page
         )
-        
+        print('flows_data', flows_data)
         logger.info("Building network data from flows")
         network_data = await build_account_flows_network(
             flows_data,
@@ -145,6 +139,7 @@ async def get_account_flows(
             existing_node_pubkeys=existing_network_data.existingNodes,
             existing_edge_ids=existing_network_data.existingEdges
         )
+        print('network_data', network_data)
 
         if not network_data["edges"]:
             logger.warning(f"No valid flows found for account: {account_address}")

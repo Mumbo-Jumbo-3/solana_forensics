@@ -6,7 +6,6 @@ from typing import Any, Dict
 import aiohttp
 import asyncpg
 from fastapi import HTTPException
-from account_tags import tags
 
 async def add_accounts_metadata(
     nodes: list[Dict[str, Any]],
@@ -133,6 +132,8 @@ async def build_tx_flows_network(
         accounts = [account["pubkey"] for account in transaction["message"]["accountKeys"]]
 
         token_days = set()
+        tx_date = datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d')
+        token_days.add(("So11111111111111111111111111111111111111112", tx_date))
 
         # PROCESS FEES
         total_fee = meta["fee"]
@@ -181,8 +182,6 @@ async def build_tx_flows_network(
                 "label": "Priority Fee"
             })
 
-        token_days.add(("So11111111111111111111111111111111111111112", datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d')))
-
         ata_to_mint = {}
         ata_to_owner = {}
         
@@ -191,7 +190,7 @@ async def build_tx_flows_network(
             ata_pubkey = accounts[account_index]
             ata_to_mint[ata_pubkey] = balance['mint']
             ata_to_owner[ata_pubkey] = balance['owner']
-            token_days.add((balance['mint'], datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d')))
+            token_days.add((balance['mint'], tx_date))
         
         for balance in meta.get("postTokenBalances", []):
             account_index = balance['accountIndex']
@@ -325,8 +324,37 @@ async def build_tx_flows_network(
                         "txId": transaction["signatures"][0]
                     }
                     add_edge_if_new(edge)
-            
-        
+
+                elif ix["parsed"].get("type") == "mintTo" and ix.get("programId") == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA":
+                    info = ix["parsed"]["info"]
+                    mint = info["mint"]
+                    amount = info["amount"]
+                    destination = info["account"]
+
+                    destination_node = {
+                        "pubkey": destination
+                    }
+                    if destination_node not in nodes:
+                        nodes.append(destination_node)
+
+                    mint_node = {
+                        "pubkey": "Mint",
+                        "label": "Mint"
+                    }
+                    if mint_node not in nodes:
+                        nodes.append(mint_node)
+
+                    edge = {
+                        "source": "Mint",
+                        "target": destination,
+                        "amount": amount,
+                        "type": "mint",
+                        "label": "Mint",
+                        "mint": mint,
+                        "txId": transaction["signatures"][0]
+                    }
+                    add_edge_if_new(edge)
+
         # PROCESS INNER INSTRUCTIONS
         current_program_id = None
         if meta["innerInstructions"]:
@@ -435,9 +463,11 @@ async def build_tx_flows_network(
                     edge["amount"] = sol_amount
                     edge["value"] = sol_amount * sol_price
                 else:
+                    whole_amount = float(edge["amount"]) / 10 ** token_decimals[edge["mint"]]
                     edge["ticker"] = token_tickers[edge["mint"]]
                     edge["tokenImage"] = token_img_urls[edge["mint"]]
-                    edge["amount"] = float(edge["amount"]) / 10 ** token_decimals[edge["mint"]]
+                    edge["amount"] = whole_amount
+                    edge["value"] = whole_amount * prices_map[(edge["mint"], tx_date)]
 
         # ADD ACCOUNT METADATA
         nodes = await add_accounts_metadata(nodes, existing_node_pubkeys, db)
@@ -478,6 +508,7 @@ async def build_account_flows_network(
         token_days = [(flow['token_address'], datetime.fromtimestamp(flow['block_time']).strftime('%Y%m%d')) for flow in flows_data]
         unique_token_days = list(set(token_days))
         prices_map = await get_prices(unique_token_days, db)
+        print('prices_map', prices_map)
 
         for flow in flows_data:
             if not flow["from_address"] or not flow["to_address"]:
@@ -586,6 +617,7 @@ async def build_account_flows_network(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 async def get_prices(token_days, db: asyncpg.Connection = None):
+    print('token_days', token_days)
     prices_map = {}
     if not token_days:
         return prices_map

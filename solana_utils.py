@@ -110,10 +110,12 @@ async def fetch_account_flows(
         }
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
+                print('url', url)
                 if resp.status != 200:
                     print('resp.text', await resp.text())
                     raise HTTPException(status_code=resp.status, detail="Failed to fetch transaction data")
                 json_data = await resp.json()
+                print('json_data', json_data)
                 if json_data.get('success') != True:
                     print('json_data', json_data)
                     raise HTTPException(status_code=400, detail="Failed to fetch transaction data")

@@ -14,4 +14,3 @@ wheels/
 
 *.json
 scraps.py
-build_sankey_data.py
