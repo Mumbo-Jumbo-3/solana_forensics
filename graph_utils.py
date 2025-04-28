@@ -7,6 +7,14 @@ import aiohttp
 import asyncpg
 from fastapi import HTTPException
 
+sol_mint = "So11111111111111111111111111111111111111111"
+wsol_mint = "So11111111111111111111111111111111111111112"
+
+def sol_address(mint: str) -> str:
+    if mint in [sol_mint, wsol_mint]:
+        return sol_mint
+    return mint
+
 async def add_accounts_metadata(
     nodes: list[Dict[str, Any]],
     existing_node_pubkeys: list = [],
@@ -133,7 +141,7 @@ async def build_tx_flows_network(
 
         token_days = set()
         tx_date = datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d')
-        token_days.add(("So11111111111111111111111111111111111111112", tx_date))
+        token_days.add((sol_mint, tx_date))
 
         # PROCESS FEES
         total_fee = meta["fee"]
@@ -155,7 +163,7 @@ async def build_tx_flows_network(
             "target": "Burn",
             "amount": base_fee / 2,
             "type": "fee",
-            "mint": "So11111111111111111111111111111111111111112",
+            "mint": sol_mint,
             "label": "Base Fee"
         })
 
@@ -168,7 +176,7 @@ async def build_tx_flows_network(
             "target": "Validator",
             "amount": base_fee / 2,
             "type": "fee",
-            "mint": "So11111111111111111111111111111111111111112",
+            "mint": sol_mint,
             "label": "Base Fee"
         })
         
@@ -178,7 +186,7 @@ async def build_tx_flows_network(
                 "target": "Validator",
                 "amount": priority_fee,
                 "type": "fee",
-                "mint": "So11111111111111111111111111111111111111112",
+                "mint": sol_mint,
                 "label": "Priority Fee"
             })
 
@@ -230,7 +238,7 @@ async def build_tx_flows_network(
                         "target": info["destination"],
                         "amount": float(info["lamports"]),
                         "type": "transfer",
-                        "mint": "So11111111111111111111111111111111111111112",
+                        "mint": sol_mint,
                         "txId": transaction["signatures"][0]
                     }
                     add_edge_if_new(edge)
@@ -242,7 +250,7 @@ async def build_tx_flows_network(
                                 inner_ix["parsed"].get("type") == "initializeAccount3" and
                                 inner_ix["programId"] == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" and
                                 inner_ix["parsed"]["info"]["account"] == info["destination"] and
-                                inner_ix["parsed"]["info"]["mint"] == "So11111111111111111111111111111111111111112"
+                                inner_ix["parsed"]["info"]["mint"] == sol_mint
                             ):
                                 # tag node where pubkey matches info["destination"] as "Wrap SOL"
                                 for node in nodes:
@@ -256,7 +264,7 @@ async def build_tx_flows_network(
                                     "amount": info["lamports"],
                                     "value": info["lamports"],
                                     "type": "transfer",
-                                    "mint": "So11111111111111111111111111111111111111112",
+                                    "mint": sol_mint,
                                     "tag": "Wrap SOL",
                                     "txId": transaction["signatures"][0]
                                 }
@@ -293,7 +301,7 @@ async def build_tx_flows_network(
                         "target": new_account,
                         "amount": lamports,
                         "type": "stake",
-                        "mint": "So11111111111111111111111111111111111111112",
+                        "mint": sol_mint,
                         "txId": transaction["signatures"][0]
                     }
                     add_edge_if_new(edge)
@@ -320,7 +328,7 @@ async def build_tx_flows_network(
                         "target": vote_account,
                         "amount": 1,
                         "type": "delegate",
-                        "mint": "So11111111111111111111111111111111111111112",
+                        "mint": sol_mint,
                         "txId": transaction["signatures"][0]
                     }
                     add_edge_if_new(edge)
@@ -402,7 +410,7 @@ async def build_tx_flows_network(
         
         # ADD TRANSFER METADATA
         token_addresses = {
-            edge["mint"] for edge in edges if "mint" in edge and "mint" not in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]
+            edge["mint"] for edge in edges if "mint" in edge and edge["mint"] not in [sol_mint, wsol_mint]
         }
         token_tickers = {}
         token_decimals = {}
@@ -453,11 +461,12 @@ async def build_tx_flows_network(
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"RPC request failed: {str(e)}")
         
-        sol_price = prices_map[("So11111111111111111111111111111111111111112", datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d'))]
+        sol_price = prices_map[(sol_mint, datetime.fromtimestamp(result['blockTime']).strftime('%Y%m%d'))]
         for edge in edges:
             if "mint" in edge and edge["type"] != "delegate":
-                if edge["mint"] in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]:
+                if edge["mint"] in [sol_mint, wsol_mint]:
                     sol_amount = float(edge["amount"]) / 10 ** 9
+                    edge["mint"] = sol_mint
                     edge["ticker"] = "SOL"
                     edge["tokenImage"] = "https://assets.coingecko.com/coins/images/4128/standard/solana.png?1718769756"
                     edge["amount"] = sol_amount
@@ -502,6 +511,7 @@ async def build_account_flows_network(
 
         def add_edge_if_new(edge):
             edge_id = f"{edge['txId']}-{edge['source']}-{edge['target']}-{edge['mint']}-{edge['amount']}"
+            print('edge_id', edge_id)
             if edge_id not in existing_edge_ids:
                 edges.append(edge)
 
@@ -545,7 +555,7 @@ async def build_account_flows_network(
 
         # ADD TRANSFER METADATA
         token_addresses = {
-            edge["mint"] for edge in edges if "mint" in edge and "mint" not in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]
+            edge["mint"] for edge in edges if "mint" in edge and edge["mint"] not in [sol_mint, wsol_mint]
         }
         token_tickers = {}
         token_img_urls = {}
@@ -599,7 +609,8 @@ async def build_account_flows_network(
         
         for edge in edges:
             if "mint" in edge:
-                if edge["mint"] in ["So11111111111111111111111111111111111111112", "So11111111111111111111111111111111111111111"]:
+                if edge["mint"] in [sol_mint, wsol_mint]:
+                    edge["mint"] = sol_mint
                     edge["ticker"] = "SOL"
                     edge['tokenImage'] = "https://assets.coingecko.com/coins/images/4128/standard/solana.png?1718769756"
                 else:

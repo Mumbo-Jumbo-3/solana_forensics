@@ -122,6 +122,7 @@ async def get_account_flows(
     db: asyncpg.Connection = Depends(get_db)
 ):
     try:
+        print('existing_network_data', existing_network_data)
         flows_data = await fetch_account_flows(
             account_address,
             direction=direction,
